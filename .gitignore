@@ -1,0 +1,16 @@
+
+outputs/*
+!outputs/.gitkeep
+
+inputs/*
+!inputs/.gitkeep
+
+dataset/*
+!dataset/.gitkeep
+
+__pycache__
+
+*.log
+tira-output/
+logs/*
+!logs/.gitkeep
