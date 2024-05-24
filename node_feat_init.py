@@ -12,6 +12,8 @@ from torch.optim import AdamW
 from transformers import get_scheduler
 import torch
 from tqdm.auto import tqdm
+from tqdm import tqdm
+from sklearn.metrics import accuracy_score, f1_score
 import evaluate
 import pandas as pd
 import gc
@@ -21,181 +23,147 @@ import utils
 logging.set_verbosity_warning()
 INDEX = 0
 
+# google-bert/bert-base-cased
+# FacebookAI/roberta-base
+# google-bert/bert-base-multilingual-cased      multiligual
+# FacebookAI/xlm-roberta-base                   multiligual
+LLM_HF_NAME = "FacebookAI/xlm-roberta-base"
+
+# andricValdez/bert-base-multilingual-cased-finetuned-autext24
+LLM_HF_FINETUNED_NAME = "andricValdez/bert-base-multilingual-cased-finetuned-autext24"
+
 
 def llm_tokenize_function(examples, tokenizer):
     return tokenizer(examples["text"], padding="max_length", truncation=True, return_tensors='pt')
+ 
 
 def llm_compute_metrics(eval_pred):
     logits, labels = eval_pred
     predictions = np.argmax(logits, axis=-1)
     return metric.compute(predictions=predictions, references=labels)
 
-def llm_fine_tuning(train_text_docs, test_text_docs):
-    #dataset_tst = load_dataset("yelp_review_full") # {'label': 0, 'text': "abc..."}
-    #print(type(dataset_tst))
-    #return
+
+def compute_metrics(pred):
+    labels = pred.label_ids
+    preds = pred.predictions.argmax(-1)
+    f1 = f1_score(labels, preds, average="weighted")
+    acc = accuracy_score(labels, preds)
+    return {"accuracy": acc, "f1": f1}
+
+
+def llm_fine_tuning(model_name, train_set_df, val_set_df, device):
+
+    model_name = f"{LLM_HF_NAME}-finetuned-{model_name}"   
+    dataset = DatasetDict({
+        "train": Dataset.from_dict(train_set_df),
+        "validation": Dataset.from_dict(pd.DataFrame(data=val_set_df))
+    })
+
+    tokenizer = AutoTokenizer.from_pretrained(LLM_HF_NAME) 
+    tokenized_dataset = dataset.map(llm_tokenize_function, batched=True, fn_kwargs={"tokenizer": tokenizer})
+    tokenized_dataset = tokenized_dataset.remove_columns(["text"])
+    tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
+    tokenized_dataset.set_format("torch")
+    print(tokenized_dataset)
+
+    batch_size = 32
+    num_labels = 2
+    model = (AutoModelForSequenceClassification.from_pretrained(LLM_HF_NAME, num_labels=num_labels).to(device))
+    logging_steps = len(tokenized_dataset["train"]) // batch_size
     
-    train_dataset = [{'label': d['context']['target'], 'text': d['doc']} for d in train_text_docs]
-    test_dataset = [{'label': d['context']['target'], 'text': d['doc']} for d in test_text_docs]
-    merge_dataset = train_dataset + test_dataset
-
-    train_dataset = Dataset.from_dict(pd.DataFrame(data=train_dataset))
-    test_dataset = Dataset.from_dict(pd.DataFrame(data=test_dataset))
-    merge_dataset = Dataset.from_dict(pd.DataFrame(data=merge_dataset))
-
-    #dataset = DatasetDict({"train":train_dataset,"test":test_dataset})
-    dataset = DatasetDict({"train":merge_dataset})
-
-    print(type(dataset))
-    print(dataset)
-    #print(dataset["train"][100])
-
-    torch.cuda.empty_cache()
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased") 
-    tokenized_datasets = dataset.map(llm_tokenize_function, batched=True, fn_kwargs={"tokenizer": tokenizer})
-
-    tokenized_datasets = tokenized_datasets.remove_columns(["text"])
-    tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
-    tokenized_datasets.set_format("torch")
-    print(tokenized_datasets)
-    print(tokenized_datasets['train'].features)
-
-    merge_loader = DataLoader(tokenized_datasets['train'], shuffle=True, batch_size=8)
-    #train_loader = DataLoader(tokenized_datasets['train], shuffle=True, batch_size=8)
-    #test_loader = DataLoader(tokenized_datasets['test], batch_size=8)
-    
-    model = AutoModelForSequenceClassification.from_pretrained("bert-base-multilingual-cased", num_labels=2)
-    optimizer = AdamW(model.parameters(), lr=5e-5)
-    criterion = torch.nn.CrossEntropyLoss()  
-    
-    num_epochs = 5
-    num_training_steps = num_epochs * len(merge_loader)
-    lr_scheduler = get_scheduler(
-        name="linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
+    training_args = TrainingArguments(
+        output_dir=utils.OUTPUT_DIR_PATH + 'finetuned_hf_models/' + model_name,
+        num_train_epochs=5,
+        learning_rate=2e-5,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        weight_decay=0.01,
+        evaluation_strategy="epoch",
+        disable_tqdm=False,
+        logging_steps=logging_steps,
+        push_to_hub=True,
+        log_level="error"
     )
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model.to(device)
-    print("device: ", device)
-
-    progress_bar = tqdm(range(num_training_steps))
-    model.train()
-    for epoch in range(num_epochs):
-        for batch in merge_loader:
-            #print(batch)
-            #assert 0
-            batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**batch)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
-            progress_bar.update(1)
-
-    metric = evaluate.load("accuracy")
-    model.eval()
-    for batch in merge_loader:
-        batch = {k: v.to(device) for k, v in batch.items()}
-        with torch.no_grad():
-            outputs = model(**batch)
-        logits = outputs.logits
-        predictions = torch.argmax(logits, dim=-1)
-        metric.add_batch(predictions=predictions, references=batch["labels"])
-
-    print(metric.compute())
-    torch.save(model.state_dict(), utils.OUTPUTS_PATH + 'llm_trained.pt')
-
-
-def llm_get_embbedings(dataset, device='cpu'):
-    print("llm_get_embbedings device: ", device)
-    #pan24_dataset_train = utils.read_pan24_dataset(subset='train')
-    #pan24_dataset_test = utils.read_pan24_dataset(subset='test')
-    #pan24_dataset = pan24_dataset_train + pan24_dataset_test
+    trainer = Trainer(
+        model=model, 
+        args=training_args,
+        compute_metrics=compute_metrics,
+        train_dataset=tokenized_dataset["train"],
+        eval_dataset=tokenized_dataset["validation"],
+        tokenizer=tokenizer
+    )
+    trainer.train()
     
+    preds_output = trainer.predict(tokenized_dataset["validation"])
+    print(preds_output.metrics)
+    y_preds = np.argmax(preds_output.predictions, axis=1)
     
+    trainer.push_to_hub()
+
+
+def llm_get_embbedings(dataset, subset, emb_type='llm_cls', device='cpu', output_path='', save_emb=False):
+
     dataset = Dataset.from_dict(pd.DataFrame(data=dataset))
     dataset = dataset.with_format("torch", device=device)
-    #print(dataset)
     dataset = DatasetDict({"dataset": dataset})
 
-    #print(type(dataset))
-    #print(dataset)
-
+    print(f"NFI -> device: {device} | subset: {subset} | emb_type: {emb_type} | save_emb: {save_emb} ")
     torch.cuda.empty_cache()
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased") 
-
+    tokenizer = AutoTokenizer.from_pretrained(LLM_HF_FINETUNED_NAME) 
     tokenized_datasets = dataset.map(llm_tokenize_function, batched=True, fn_kwargs={"tokenizer": tokenizer})
-
     tokenized_datasets = tokenized_datasets.remove_columns(["text"])
-    #tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
     tokenized_datasets.set_format("torch")
 
-    #print(tokenized_datasets)
-    #print(tokenized_datasets['dataset'].features)
-
-    dataset_loader = DataLoader(tokenized_datasets['dataset'], batch_size=64)
-    model = AutoModelForSequenceClassification.from_pretrained("bert-base-multilingual-cased", num_labels=2)
-    model.load_state_dict(torch.load(utils.OUTPUTS_PATH + 'llm_trained.pt', map_location = device))
-
+    dataset_loader = DataLoader(tokenized_datasets['dataset'], batch_size=utils.LLM_GET_EMB_BATCH_SIZE_DATALOADER)
+    model = AutoModelForSequenceClassification.from_pretrained(LLM_HF_FINETUNED_NAME, num_labels=2)
     model.to(device)
-    #print("device: ", device)
 
     global INDEX 
     INDEX = 0
-    test_outputs_model = []
-    for batch in dataset_loader:
-        #batch = {k: v.to(device) for k, v in batch.items()}
+    emb_output_model = []
+    for step, batch in enumerate(tqdm(dataset_loader)):
+
         with torch.no_grad():
-            outputs_test = model(batch['input_ids'].to(device), output_hidden_states=True)
-            last_hidden_states_test = outputs_test.hidden_states[-1]
-            #test_outputs_model.append(outputs_test)
-            # SAVE DATA
-            #print(last_hidden_states_test.shape)
-            emb = llm_extract_emb(outputs_test, tokenizer, tokenized_datasets)
-            test_outputs_model += emb
+            outputs_model = model(batch['input_ids'].to(device), output_hidden_states=True)
+            last_hidden_state = outputs_model.hidden_states[-1]
 
-    torch.cuda.empty_cache()
-    gc.collect()
+            embeddings_lst = llm_extract_emb(
+                outputs_model=outputs_model, 
+                batch=batch, batch_step=step, 
+                subset=subset, tokenizer=tokenizer, 
+                tokenized_datasets=tokenized_datasets, 
+                emb_type=emb_type
+            )
+            if save_emb == True:
+                utils.save_llm_embedings(embeddings_data=embeddings_lst, emb_type=emb_type, batch_step=step, file_path=output_path)
+            else:    
+                emb_output_model += embeddings_lst
 
-    #utils.save_json(test_outputs_model, file_path=utils.OUTPUTS_PATH + 'embeddings.json')
-    #utils.save_data(test_outputs_model, file_name='embeddings')
+        torch.cuda.empty_cache()
+        gc.collect()
 
-    #print(len(test_outputs_model))
-    return test_outputs_model
-    #print(test_outputs_model[0]['id'])
-    #print(test_outputs_model[0]['doc_index'])
-    #print(test_outputs_model[0]['embeddings']['[CLS]'])
-
-    #for o in test_outputs_model:
-    #    print(o.hidden_states[-1].shape)
+    return emb_output_model
 
 
-def llm_extract_emb(model, tokenizer, tokenized_datasets):
-    embb_test_dict = []
+def llm_extract_emb(outputs_model, batch, batch_step, subset, tokenizer, tokenized_datasets, emb_type):
+    embeddings_dict_lst = []
     global INDEX
     #INDEX = 0
-    batch = model.hidden_states[-1]
-    #print(batch.shape, len(batch))
-    for i in range(0, len(batch)):
-        #print('--------------------------> ', i, INDEX)
-        raw_tokens = [tokenizer.decode([token_id]) for token_id in tokenized_datasets['dataset'][INDEX]['input_ids']]
-        doc_id = tokenized_datasets['dataset'][INDEX]['id']
-        #label = tokenized_datasets['dataset'][INDEX]['labels']
-        #print(raw_tokens)
-        d = {"id": doc_id, "doc_index": INDEX, 'embeddings': {}} # ver forma de obtener ID de docu
-        for token, embedding in zip(raw_tokens, batch[i]):
-            #print(f"Token: {token}")
-            #print(f"Token Len: {len(tokenized_text)}")
-            #print(f"Embedding: {len(embedding)}")
-            #print(f"Embedding: {embedding}")
+    last_hidden_state = outputs_model.hidden_states[-1]
+    if emb_type == 'llm_cls': # llm_doc
+        embeddings = last_hidden_state[:,0] # get cls
+        embeddings_dict_lst.append({"batch": batch_step, "subset": subset, "doc_id": batch['id'], "labels": batch['label'], "embedding": embeddings})
+        return embeddings_dict_lst
+    else: # llm_word
+        for i in range(0, len(last_hidden_state)):
+            raw_tokens = [tokenizer.decode([token_id]) for token_id in tokenized_datasets['dataset'][INDEX]['input_ids']]
+            doc_id = tokenized_datasets['dataset'][INDEX]['id']
+            label = tokenized_datasets['dataset'][INDEX]['label']
+            d = {"doc_id": doc_id, "doc_index": INDEX, 'label': label, 'embedding': {}} # ver forma de obtener ID de docu
+            for token, embedding in zip(raw_tokens, last_hidden_state[i]):
+                d['embedding'][token] = embedding.cpu().detach().numpy().tolist()
+            embeddings_dict_lst.append(d) 
+            INDEX += 1
 
-            #d['embeddings'].append({"token": token, 'embedding': embedding })
-            d['embeddings'][token] = embedding.cpu().detach().numpy().tolist()
-            #d['embeddings'][token] = embedding
-        embb_test_dict.append(d) 
-        INDEX += 1
-
-    #print("embb_test_dict: ", len(embb_test_dict))
-    return embb_test_dict
-    #embb_test_dict[0]['embeddings']['[CLS]']
+        return embeddings_dict_lst

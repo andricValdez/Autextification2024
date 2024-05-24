@@ -26,7 +26,7 @@ from sklearn.metrics import mean_squared_error
 import xgboost as xgb
 
 import utils
-
+ 
 
 def get_metrics(predicted, labels):
     print('Accuracy:', np.mean(predicted == labels))  
@@ -60,19 +60,19 @@ def test(texts, labels, model):
     get_metrics(predicted, labels)
 
 
-def main(train_set, test_set, algo_ml='SGDClassifier'):
+def main(train_set, val_set, algo_ml='SGDClassifier'):
     print('training model...')
     if algo_ml == 'xgboost':
         vectorizer = TfidfVectorizer()
         X_train = vectorizer.fit_transform(train_set['text'])
-        X_test = vectorizer.transform(test_set['text'])
+        X_test = vectorizer.transform(val_set['text'])
         model = xgb.XGBClassifier(n_jobs=-1)
         model.fit(X_train, train_set['label'])
         predicted = model.predict(X_test)
-        print('Accuracy:', np.mean(predicted == test_set['label']))  
+        print('Accuracy:', np.mean(predicted == val_set['label']))  
 
     else:
         model = train(train_set, algo_ml)   
-        test(texts=test_set['text'], labels=test_set['label'], model=model)
+        test(texts=val_set['text'], labels=val_set['label'], model=model)
 
     #utils.save_data(data=model, file_name=algo_ml)
