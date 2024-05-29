@@ -27,8 +27,10 @@ INDEX = 0
 # FacebookAI/roberta-base
 # google-bert/bert-base-multilingual-cased      multiligual
 # FacebookAI/xlm-roberta-base                   multiligual
+# intfloat/multilingual-e5-large                multiligual
 LLM_HF_NAME = "FacebookAI/xlm-roberta-base"
 
+# andricValdez/multilingual-e5-large-finetuned-autext24
 # andricValdez/bert-base-multilingual-cased-finetuned-autext24
 LLM_HF_FINETUNED_NAME = "andricValdez/bert-base-multilingual-cased-finetuned-autext24"
 
@@ -66,7 +68,7 @@ def llm_fine_tuning(model_name, train_set_df, val_set_df, device):
     tokenized_dataset.set_format("torch")
     print(tokenized_dataset)
 
-    batch_size = 32
+    batch_size = 8
     num_labels = 2
     model = (AutoModelForSequenceClassification.from_pretrained(LLM_HF_NAME, num_labels=num_labels).to(device))
     logging_steps = len(tokenized_dataset["train"]) // batch_size
@@ -102,7 +104,7 @@ def llm_fine_tuning(model_name, train_set_df, val_set_df, device):
     trainer.push_to_hub()
 
 
-def llm_get_embbedings(dataset, subset, emb_type='llm_cls', device='cpu', output_path='', save_emb=False):
+def llm_get_embbedings(dataset, subset, emb_type='llm_cls', device='cpu', output_path='', save_emb=False, llm_finetuned_name=LLM_HF_FINETUNED_NAME):
 
     dataset = Dataset.from_dict(pd.DataFrame(data=dataset))
     dataset = dataset.with_format("torch", device=device)
@@ -110,13 +112,13 @@ def llm_get_embbedings(dataset, subset, emb_type='llm_cls', device='cpu', output
 
     print(f"NFI -> device: {device} | subset: {subset} | emb_type: {emb_type} | save_emb: {save_emb} ")
     torch.cuda.empty_cache()
-    tokenizer = AutoTokenizer.from_pretrained(LLM_HF_FINETUNED_NAME) 
+    tokenizer = AutoTokenizer.from_pretrained(llm_finetuned_name) 
     tokenized_datasets = dataset.map(llm_tokenize_function, batched=True, fn_kwargs={"tokenizer": tokenizer})
     tokenized_datasets = tokenized_datasets.remove_columns(["text"])
     tokenized_datasets.set_format("torch")
 
     dataset_loader = DataLoader(tokenized_datasets['dataset'], batch_size=utils.LLM_GET_EMB_BATCH_SIZE_DATALOADER)
-    model = AutoModelForSequenceClassification.from_pretrained(LLM_HF_FINETUNED_NAME, num_labels=2)
+    model = AutoModelForSequenceClassification.from_pretrained(llm_finetuned_name, num_labels=2)
     model.to(device)
 
     global INDEX 

@@ -28,7 +28,6 @@ logger.setLevel(logging.INFO)
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__)) + '/Autextification2024'
 DATASET_DIR = ROOT_DIR + '/dataset/'
 OUTPUT_DIR_PATH = ROOT_DIR + '/outputs/'
-OUTPUTS_PATH = '/home/avaldez/projects/Autextification2024/outputs/'
 INPUT_DIR_PATH = ROOT_DIR + '/inputs/'
 CUT_PERCENTAGE_DATASET = 100
 TODAY_DATE = datetime.today().strftime('%Y-%m-%d')
@@ -99,13 +98,13 @@ def text_metrics(dataframe):
     print("Text Min Tokens: ", min_text_len)
     
 
-def process_autext24_dataset(dataframe):
+def process_autext24_dataset(corpus_text_docs):
     text_data_lst = []
-    corpus_text_docs = shuffle(dataframe)
+    #corpus_text_docs = shuffle(corpus_text_docs)
     corpus_text_docs_dict = corpus_text_docs.to_dict('records')
     for instance in corpus_text_docs_dict:
-        if len(instance['text'].split()) < 20:
-            continue
+        #if len(instance['text'].split()) < 20:
+        #    continue
         doc = {
             "id": instance['id'], 
             "doc": instance['text'][:], 
@@ -157,8 +156,8 @@ def set_text_lang(dataset):
     return dataset
     
     #dataset_null_lang = dataset[dataset['lang'].isna()]
-    #dataset.to_csv(OUTPUTS_PATH + 'dataset.csv')
-    #dataset_null_lang.to_csv(OUTPUTS_PATH + 'autext_ddataset_null_langataset.csv')
+    #dataset.to_csv(OUTPUT_DIR_PATH + 'dataset.csv')
+    #dataset_null_lang.to_csv(OUTPUT_DIR_PATH + 'autext_ddataset_null_langataset.csv')
     
 
 def joblib_delayed(funct, params):

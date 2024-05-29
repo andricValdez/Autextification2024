@@ -14,6 +14,9 @@ import warnings
 import nltk
 import os
 import re
+import string
+import math
+import codecs
 import multiprocessing
 from spacy.tokens import Doc
 import spacy
@@ -110,6 +113,15 @@ class Text2Graph():
         self.graph_type = graph_type
         self.parallel_exec = parallel_exec
         self.language = language
+        self.steps_prep = steps_preprocessing
+        self.stopwords_lang = {
+            "en": self._set_stopwords(utils.INPUT_DIR_PATH + '/stopwords_en.txt'),
+            "es": self._set_stopwords(utils.INPUT_DIR_PATH + '/stopwords_es.txt'),
+            "pt": self._set_stopwords(utils.INPUT_DIR_PATH + '/stopwords_pt.txt'),
+            "ca": self._set_stopwords(utils.INPUT_DIR_PATH + '/stopwords_ca.txt'),
+            "eu": self._set_stopwords(utils.INPUT_DIR_PATH + '/stopwords_eu.txt'),
+            "gl": self._set_stopwords(utils.INPUT_DIR_PATH + '/stopwords_gl.txt'),
+        }
 
         # scpay model
         #self.nlp = spacy.blank("xx")
@@ -124,13 +136,12 @@ class Text2Graph():
         self.nlp.tokenizer = custom_tokenizer(self.nlp)
         
 
-
     def _get_entities(self, doc_instance) -> list:  
         nodes = []
         for token in doc_instance:
             if token.text in ['[CLS]', '[SEP]', '[UNK]']:
                 continue
-            node = (str(token.text), {}) # (word, {'node_attr': value})
+            node = (str(token.text), {}) # (word, {'node_attr': value}) | {'pos_tag': token.pos_}
             nodes.append(node)
 
         logger.debug("Nodes: %s", nodes)
@@ -144,25 +155,59 @@ class Text2Graph():
             if token.text in ['[CLS]', '[SEP]', '[UNK]']:
                 continue
             text_doc_tokens.append(token.text)
+        
         for i in range(len(text_doc_tokens)):
             word = text_doc_tokens[i]
             next_word = text_doc_tokens[i+1 : i+1 + self.window_size]
             for t in next_word:
                 key = (word, t)
                 d_cocc[key] += 1
-        for key, value in d_cocc.items():
-            edge = (key[0], key[1], {'freq': value})  # (word_i, word_j, {'edge_attr': value})
+        
+        unigram_freq = nltk.FreqDist(text_doc_tokens)
+        bigram_freq = nltk.FreqDist(d_cocc)
+        for words, value in d_cocc.items():   
+            pmi_val = self._pmi(words, unigram_freq, bigram_freq)
+            edge = (words[0], words[1], {'freq': value, 'pmi': round(pmi_val,4)})  # (word_i, word_j, {'edge_attr': value})
             edges.append(edge) 
-
         logger.debug("Edges: %s", edges)
         return edges
     
-    
-    def _text_normalize(self, text: str) -> list:
-        prep_text = text.lower() # text to lower case
-        prep_text = re.sub(r'\s+', ' ', prep_text).strip() # remove blank spaces
-        prep_text = re.compile('<.*?>').sub(r'', prep_text) # remove html tags
-        return prep_text
+
+    def _pmi(self, words, unigram_freq, bigram_freq):
+        prob_word1 = unigram_freq[words[0]] / float(sum(unigram_freq.values()))
+        prob_word2 = unigram_freq[words[1]] / float(sum(unigram_freq.values()))
+        prob_word1_word2 = bigram_freq[words] / float(sum(bigram_freq.values()))
+        return math.log(prob_word1_word2/float(prob_word1*prob_word2),2) 
+
+
+    def _set_stopwords(self, stoword_path):
+        stopwords = []
+        for line in codecs.open(stoword_path, encoding="utf-8"):
+            # Remove black space if they exist
+            stopwords.append(line.strip())
+        return dict.fromkeys(stopwords, True)
+
+
+    def _handle_stop_words(self, text, stop_words) -> str:
+        tokens = nltk.word_tokenize(text)
+        without_stopwords = [word for word in tokens if not word.lower().strip() in stop_words]
+        return " ".join(without_stopwords)
+
+
+    def _text_normalize(self, text: str, lang_code: str) -> list:
+        if self.apply_prep:
+            if self.steps_prep['to_lowercase']:
+                text = text.lower() # text to lower case
+            if self.steps_prep['handle_blank_spaces']:
+                text = re.sub(r'\s+', ' ', text).strip() # remove blank spaces
+            if self.steps_prep['handle_html_tags']:
+                text = re.compile('<.*?>').sub(r'', text) # remove html tags
+            if self.steps_prep['handle_special_chars']:
+                text = re.sub('[^A-Za-z0-9]+ ', ' ', text) # remove special chars
+                text = text.replace('"',"")
+            if self.steps_prep['handle_stop_words']:
+                text = self._handle_stop_words(text, stop_words=self.stopwords_lang[lang_code]) # remove stop words
+        return text
 
 
     def _nlp_pipeline(self, docs: list, params = {'get_multilevel_lang_features': False}):
@@ -218,9 +263,11 @@ class Text2Graph():
         prep_docs, corpus_output_graph, delayed_func = [], [], []
 
         logger.debug("Preprocessing")
+        
         for doc_data in corpus_texts:
+            lang_code = doc_data['context']['lang_code']
             if self.apply_prep == True:
-                doc_data['doc'] = self._text_normalize(doc_data['doc'])
+                doc_data['doc'] = self._text_normalize(doc_data['doc'], lang_code)
             prep_docs.append(
                 (doc_data['doc'], {'id': doc_data['id'], "context": doc_data['context']})
             )
