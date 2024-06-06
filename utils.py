@@ -84,6 +84,12 @@ def create_dir(dir_path):
   if not os.path.exists(dir_path):
     os.makedirs(dir_path)
 
+def is_dir_empty(dir_path):
+    if len(os.listdir(dir_path)) == 0:
+        return True
+    else:    
+        return False
+
 def text_metrics(dataframe):
     text_lens, max_text_len, min_text_len = 0, 0, 1000000000
     for index, row in dataframe.iterrows():
@@ -134,8 +140,8 @@ def lang_identify(dataframe): # must contain 'text' column
     for index, row in dataframe[:].iterrows():
         #if len(row['text'].split(' ')) < 50:
         #    continue
-        if row['lang']:
-            continue
+        #if row['lang']:
+        #    continue
         try: 
             lang = Detector(row['text'])
             #print(len(row['text'].split(' ')), lang.language)
@@ -144,6 +150,9 @@ def lang_identify(dataframe): # must contain 'text' column
             dataframe.loc[index, 'lang_confidence'] = lang.language.confidence
         except Exception as err:
             ...
+            dataframe.loc[index, 'lang'] = 'inglés'
+            dataframe.loc[index, 'lang_code'] = 'en'
+            dataframe.loc[index, 'lang_confidence'] = 0
             #print("error detecting lang: ", str(err))
     return dataframe
 
@@ -176,9 +185,11 @@ def create_expriment_dirs(exp_file_path):
     create_dir(dir_path=exp_file_path)
     create_dir(dir_path=exp_file_path + 'embeddings_gnn/')
     create_dir(dir_path=exp_file_path + 'embeddings_cls_llm/')
+    create_dir(dir_path=exp_file_path + 'embeddings_cls_llm_2/')
     create_dir(dir_path=exp_file_path + 'embeddings_word_llm/')
     create_dir(dir_path=exp_file_path + 'graphs/')
     create_dir(dir_path=exp_file_path + 'preds/')
+    create_dir(dir_path=exp_file_path + 'clf_models/')
 
 
 def save_llm_embedings(embeddings_data, emb_type, batch_step=0, file_path=OUTPUT_DIR_PATH):
@@ -227,8 +238,8 @@ def extract_stylo_feat(data, output_path, subset):
     return stylo_feat_lst
     
 
-def llm_get_embbedings(text_data, exp_file_path, subset, emb_type, device, save_emb):
+def llm_get_embbedings(text_data, exp_file_path, subset, emb_type, device, save_emb, llm_finetuned_name, num_labels):
     print('Getting llm_embbedings...')
     text_data_lst = [{'id': d['context']['id'], 'label': d['context']['target'], 'text': d['doc']} for d in text_data]
     output_train_path = f"{exp_file_path}/autext24_{subset}_emb_batch_"
-    node_feat_init.llm_get_embbedings(text_data_lst, subset=subset, emb_type=emb_type, device=device, output_path=output_train_path, save_emb=True)
+    node_feat_init.llm_get_embbedings(text_data_lst, subset=subset, emb_type=emb_type, device=device, output_path=output_train_path, save_emb=True, llm_finetuned_name=llm_finetuned_name, num_labels=num_labels)

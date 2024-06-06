@@ -35,7 +35,8 @@ warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 #tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 #TOKENIZER_FILE = "/home/avaldez/projects/Autextification2024/inputs/bert-base-uncased-vocab.txt"
-TOKENIZER_FILE = "/home/avaldez/projects/Autextification2024/inputs/bert-base-multilingual-cased.txt"
+#TOKENIZER_FILE = "/home/avaldez/projects/Autextification2024/inputs/bert-base-multilingual-cased.txt"
+TOKENIZER_FILE = "/home/avaldez/projects/Autextification2024/inputs/bert-base-multilingual-cased-finetuned-autext24.txt"
 
 
 def custom_tokenizer(nlp):

@@ -15,6 +15,7 @@ import gensim
 from scipy.sparse import coo_array 
 from sklearn.datasets import fetch_20newsgroups
 import gc
+import glob
 import torch.nn.functional as F
 from torch_geometric.data import DataLoader, Data
 from torch.nn import Linear, BatchNorm1d, ModuleList, LayerNorm
@@ -27,6 +28,8 @@ from sklearn.svm import LinearSVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import f1_score
+from collections import OrderedDict
 
 import utils
 import node_feat_init
@@ -60,7 +63,7 @@ class EarlyStopper:
 
 
 class BuildDataset():
-    def __init__(self, graphs_data, subset, device, model_w2v=None, edge_features=False, nfi='llm', llm_finetuned_name=node_feat_init.LLM_HF_FINETUNED_NAME):
+    def __init__(self, graphs_data, subset, device, model_w2v=None, edge_features=False, nfi='llm', llm_finetuned_name=node_feat_init.LLM_HF_FINETUNED_NAME, exp_file_path=utils.OUTPUT_DIR_PATH, num_labels=2):
         self.graphs_data = graphs_data
         self.model_w2v = model_w2v
         self.llm_model = None
@@ -69,6 +72,8 @@ class BuildDataset():
         self.nfi = nfi
         self.edge_features = edge_features
         self.llm_finetuned_name = llm_finetuned_name
+        self.exp_file_path = exp_file_path
+        self.num_labels = num_labels
 
     def process_dataset(self):
         #if self.nfi == 'llm' and True:
@@ -78,8 +83,8 @@ class BuildDataset():
         block = 1
         batch_size = utils.LLM_GET_EMB_BATCH_SIZE_DATALOADER
         num_batches = math.ceil(len(self.graphs_data) / batch_size)
-        data_list = []
-        for index, _ in enumerate(tqdm(range(num_batches))):
+        for index_out_batch, _ in enumerate(tqdm(range(num_batches))):
+            data_list = []
             graphs_data_batch = self.graphs_data[batch_size*(block-1) : batch_size*block]
             if self.nfi == 'llm':
                 # Data storage/saved
@@ -87,9 +92,9 @@ class BuildDataset():
                 #self.llm_model = self.llm_model.to_dict('records')
                 # Data In memory
                 dataset = [{'id': d['context']['id'], 'label': d['context']['target'], 'text': " ".join(list(d['graph'].nodes))} for d in graphs_data_batch]
-                self.llm_model = node_feat_init.llm_get_embbedings(dataset, subset=self.subset, emb_type='llm_word', device=self.device, save_emb=False, llm_finetuned_name=self.llm_finetuned_name)
+                self.llm_model = node_feat_init.llm_get_embbedings(dataset, subset=self.subset, emb_type='llm_word', device=self.device, save_emb=False, llm_finetuned_name=self.llm_finetuned_name, num_labels=self.num_labels)
 
-            for index, g in enumerate(graphs_data_batch):
+            for index_in_batch, g in enumerate(graphs_data_batch):
                 #print(g['graph'])
                 try:
                     # Get node features
@@ -112,10 +117,13 @@ class BuildDataset():
                     )
                     data_list.append(data)
                 except Exception as e:
+                    print(g)
                     logger.error('Error: %s', str(e))
+                    print("traceback: ", str(traceback.format_exc()))
 
+            torch.save(data_list, f'{self.exp_file_path}embeddings_word_llm/data_{self.subset}_{index_out_batch}.pt')
             block += 1
-        del self.llm_model
+            del self.llm_model
         return data_list
         
 
@@ -313,6 +321,7 @@ class GNN(torch.nn.Module):
         else:
             x = global_mean_pool(x, batch)
         
+
         out = torch.relu(self.linear1(x))
         out = F.dropout(out, p=self.dropout_rate, training=self.training) 
         out = torch.relu(self.linear2(out))
@@ -327,6 +336,17 @@ class NeuralNetwork(torch.nn.Module):
     def __init__(self, in_channels, nhid, out_ch, layers_num):
         super(NeuralNetwork,self).__init__()
         self.flatten = torch.nn.Flatten()
+        layers = [('linear1', torch.nn.Linear(in_channels, nhid)), ('relu1', torch.nn.ReLU())]
+
+        for index in range(layers_num):
+            layers.append((f'linear{index+2}', torch.nn.Linear(nhid, nhid)))
+            layers.append((f'relu{index+2}', torch.nn.ReLU()))
+
+        layers.append(('fina_relu', torch.nn.Linear(nhid, out_ch)))
+        layers.append(('sigmoid', torch.nn.Sigmoid()))
+        self.linear_relu_stack = torch.nn.Sequential(OrderedDict(layers))
+
+        '''
         self.linear_relu_stack = torch.nn.Sequential(
             torch.nn.Linear(in_channels, nhid),
             torch.nn.ReLU(),
@@ -337,6 +357,8 @@ class NeuralNetwork(torch.nn.Module):
             torch.nn.Linear(nhid, out_ch),
             torch.nn.Sigmoid()
         )
+        '''
+
     def forward(self, x):
         x = self.flatten(x)
         logits = self.linear_relu_stack(x)
@@ -346,16 +368,18 @@ class NeuralNetwork(torch.nn.Module):
 def train_ml_clf_model(algo_clf, train_data, train_labels, val_data, val_labels):
     model = CalibratedClassifierCV(algo_clf()) #n_jobs=-3
     model.fit(train_data, train_labels)
-    predicted = model.predict(val_data)
-    print('\t Accuracy:', np.mean(predicted == val_labels.view(1,-1)[0].numpy()))
+    y_pred  = model.predict(val_data)
+    y_true = val_labels.view(1,-1)[0].numpy()
+    print('\t Accuracy:', np.mean(y_true == y_pred))
+    print('\t F1Score:', f1_score(y_true, y_pred , average='macro'))
     return model
 
 
 def train_dense_rrnn_clf_model(dense_model, device, train_loader, val_data, val_labels):
-    learning_rate = 0.0001
-    early_stopper = EarlyStopper(patience=20, min_delta=0)
+    learning_rate = 0.00001
+    early_stopper = EarlyStopper(patience=30, min_delta=0)
     optimizer = torch.optim.Adam(dense_model.parameters(), lr=learning_rate)
-    criterion = torch.nn.BCELoss() # BCEWithLogitsLoss, CrossEntropyLoss, BCELoss
+    criterion = torch.nn.BCEWithLogitsLoss() # BCEWithLogitsLoss, CrossEntropyLoss, BCELoss
     sigmoid = torch.nn.Sigmoid()
     dense_model = dense_model.to(device) 
     print_preds_test = False
@@ -364,6 +388,8 @@ def train_dense_rrnn_clf_model(dense_model, device, train_loader, val_data, val_
     avg_acc = 0.0
     best_acc_epoch = 0
     best_acc = 0.0
+    best_f1_scre_epoch = 0
+    best_f1_scre = 0.0
     steps = 0
     for epoch in range(1, epochs):
         dense_model.train()
@@ -381,21 +407,26 @@ def train_dense_rrnn_clf_model(dense_model, device, train_loader, val_data, val_
             train_loss += loss.item()
             steps += 1
             
-        acc, val_loss, preds_test = test_train_concat_emb(dense_model, criterion, val_data, val_labels, epoch)
+        acc, f1_scre, val_loss, preds_test = test_train_concat_emb(dense_model, criterion, val_data, val_labels, epoch)
         avg_acc += acc
         if acc > best_acc:
             best_acc = acc
             best_acc_epoch = epoch
         
-        #print(f"Epoch: {epoch} | train_loss: {loss.item():4f} | val_loss: {val_loss:4f} | acc: {acc:4f} | avg_acc: {avg_acc/(epoch+1):4f} | best_acc (epoch {best_acc_epoch}): {best_acc:4f})")
+        if f1_scre > best_f1_scre:
+            best_f1_scre = f1_scre
+            best_f1_scre_epoch = epoch
+        
+        print(f"Epoch: {epoch} | train_loss: {loss.item():4f} | val_loss: {val_loss:4f} | acc: {acc:4f} | avg_acc: {avg_acc/(epoch+1):4f} | best_acc (epoch {best_acc_epoch}): {best_acc:4f})")
         if early_stopper.early_stop(val_loss): 
             print('Early stopping fue to not improvement!') 
-            print(f"Epoch: {epoch} | train_loss: {loss.item():4f} | val_loss: {val_loss:4f} | acc: {acc:4f} | avg_acc: {avg_acc/(epoch+1):4f} | best_acc (epoch {best_acc_epoch}): {best_acc:4f})")
+            print(f"Epoch: {epoch} | train_loss: {loss.item():4f} | val_loss: {val_loss:4f} | f1_scre: {f1_scre:4f}  | acc: {acc:4f} | avg_acc: {avg_acc/(epoch+1):4f} | best_acc (epoch {best_acc_epoch}): {best_acc:4f})")
             break
 
         if epoch == 10 and print_preds_test:
             print(preds_test['outs'])
-
+    
+    print(f"best_f1_scre (epoch {best_f1_scre_epoch}): {best_f1_scre:4f}) |  best_acc (epoch {best_acc_epoch}): {best_acc:4f})")
     return dense_model
 
 
@@ -411,6 +442,9 @@ def test_train_concat_emb(dense_model, criterion, val_data, val_labels, epoch):
         acc = (logits.round() == targ).float().mean()
         acc = float(acc)
 
+        y_pred = logits.round().cpu().numpy()
+        f1_scre = f1_score(val_labels.float().cpu().numpy(), y_pred, average='macro')
+
         if epoch == 10:
             #pred_probab = sigmoid(logits)
             #y_pred = pred_probab.argmax(1)      
@@ -419,7 +453,7 @@ def test_train_concat_emb(dense_model, criterion, val_data, val_labels, epoch):
             #print(targ)
             preds_test = {'preds': logits.round().cpu().numpy().tolist(),'outs': logits.cpu().numpy().tolist()}
         
-        return acc, loss, preds_test
+        return acc, f1_scre, loss, preds_test
 
 
 def word2vect(graph_data, num_features):
@@ -454,10 +488,11 @@ def gnn_model(
     )
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.CrossEntropyLoss() # BCEWithLogitsLoss, CrossEntropyLoss, BCELoss
     logger.info("model: %s", str(model))
     logger.info("device: %s", str(device))
     model = model.to(device)
+    #model = torch.nn.DataParallel(model, device_ids = [0,1]).to(device)
     early_stopper = EarlyStopper(patience=30, min_delta=0)
     best_train_embeddings = None
     best_val_embeddings = None
@@ -469,34 +504,39 @@ def gnn_model(
     torch.cuda.empty_cache()
     gc.collect()
 
-    for epoch in range(1, epoch_num):
-        epochs_cnt += 1
-        train_loss, train_embeddings, _ = train(model, criterion, optimizer, train_loader, device=device)
-        _, train_acc, _, _ = test(model, criterion, train_loader, device=device)
-        val_loss, val_acc, val_embeddings, _ = test(model, criterion, val_loader , device=device)
-        print(f'Epoch: {epoch:03d} | Train Loss {train_loss} | Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}')
-        avg_val_score += val_acc
-        if val_acc > best_val_score:
-            best_val_score = val_acc
-            best_epoch_score = epoch
-            best_train_embeddings = train_embeddings
-            best_val_embeddings = val_embeddings
-        
-        metrics['_epoch_stop'] = epoch
-        metrics['_train_loss'] = train_loss
-        metrics['_val_loss'] = val_loss
-        metrics['_train_acc'] = train_acc
-        metrics['_val_last_acc'] = val_acc
-        if early_stopper.early_stop(val_loss): 
-            print('Early stopping fue to not improvement!')            
-            break
+    try:
+        for epoch in range(1, epoch_num):
+            epochs_cnt += 1
+            train_loss, train_embeddings, _ = train(model, criterion, optimizer, train_loader, device=device)
+            _, train_acc, _, _ = test(model, criterion, train_loader, device=device)
+            val_loss, val_acc, val_embeddings, _ = test(model, criterion, val_loader , device=device)
+            print(f'Epoch: {epoch:03d} | Train Loss {train_loss} | Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}')
+            avg_val_score += val_acc
+            if val_acc > best_val_score:
+                best_val_score = val_acc
+                best_epoch_score = epoch
+                best_train_embeddings = train_embeddings
+                best_val_embeddings = val_embeddings
+            
+            metrics['_epoch_stop'] = epoch
+            metrics['_train_loss'] = train_loss
+            metrics['_val_loss'] = val_loss
+            metrics['_train_acc'] = train_acc
+            metrics['_val_last_acc'] = val_acc
+            if early_stopper.early_stop(val_loss): 
+                print('Early stopping fue to not improvement!')            
+                break
+    except Exception as err:
+        print("Traning GNN Error: ", str(err))
+        print("traceback: ", str(traceback.format_exc()))
 
-    #metrics['_best_metrics'] = {'best_val_score': best_val_score,'best_epoch_score': best_epoch_score, 'avg_val_score': avg_val_score/epochs_cnt}
-    metrics['_val_best_acc'] = best_val_score
-    metrics['_val_best_epoch_acc'] = best_epoch_score
-    metrics['_val_avg_acc'] = avg_val_score/epochs_cnt
-    print(f'-----> Best Val Score: {best_val_score:.4f} in epoch: {best_epoch_score} | Avg Val Score: {avg_val_score/epochs_cnt:.4f}')
-    return model, metrics, best_train_embeddings, best_val_embeddings
+    finally:
+        #metrics['_best_metrics'] = {'best_val_score': best_val_score,'best_epoch_score': best_epoch_score, 'avg_val_score': avg_val_score/epochs_cnt}
+        metrics['_val_best_acc'] = best_val_score
+        metrics['_val_best_epoch_acc'] = best_epoch_score
+        metrics['_val_avg_acc'] = avg_val_score/epochs_cnt
+        print(f'-----> Best Val Score: {best_val_score:.4f} in epoch: {best_epoch_score} | Avg Val Score: {avg_val_score/epochs_cnt:.4f}')
+        return model, metrics, best_train_embeddings, best_val_embeddings
 
 
 def test(model, criterion, loader, device='cpu'):
@@ -556,8 +596,12 @@ def graph_neural_network(
         edge_features,
         llm_finetuned_name,
         edge_dim=2,
-    ):
+        num_labels=2,
+        build_dataset = True
 
+    ):
+    
+    load_tensor = True
     num_classes = 2
     num_features = 768 # llm: 768 | w2v: 768
     if llm_finetuned_name == 'andricValdez/multilingual-e5-large-finetuned-autext24':
@@ -576,27 +620,46 @@ def graph_neural_network(
         utils.save_data(graphs_val_data, path=f'{utils.OUTPUT_DIR_PATH}graphs/', file_name=f'graphs_val_{dataset_partition}')
         
         # Feat Init - Word2vect Model
-        model_w2v = word2vect(graph_data=graphs_train_data + graphs_val_data, num_features=num_features)
-        utils.save_data(model_w2v, path=f'{utils.OUTPUT_DIR_PATH}w2v_models/', file_name=f'model_w2v_{dataset_partition}')
+        #model_w2v = word2vect(graph_data=graphs_train_data + graphs_val_data, num_features=num_features)
+        #utils.save_data(model_w2v, path=f'{utils.OUTPUT_DIR_PATH}w2v_models/', file_name=f'model_w2v_{dataset_partition}')
 
-    else:
-        ...
-        graphs_train_data = utils.load_data(path=f'{utils.OUTPUT_DIR_PATH}graphs/', file_name=f'graphs_train_{dataset_partition}')  
-        graphs_val_data = utils.load_data(path=f'{utils.OUTPUT_DIR_PATH}graphs/', file_name=f'graphs_val_{dataset_partition}')  
-        model_w2v = utils.load_data(path=f'{utils.OUTPUT_DIR_PATH}w2v_models/', file_name=f'model_w2v_{dataset_partition}')
+    #else:
+    #    ...
+    #    graphs_train_data = utils.load_data(path=f'{utils.OUTPUT_DIR_PATH}graphs/', file_name=f'graphs_train_{dataset_partition}')  
+    #    graphs_val_data = utils.load_data(path=f'{utils.OUTPUT_DIR_PATH}graphs/', file_name=f'graphs_val_{dataset_partition}')  
+        #model_w2v = utils.load_data(path=f'{utils.OUTPUT_DIR_PATH}w2v_models/', file_name=f'model_w2v_{dataset_partition}')
 
-    print("graphs_train_data: ", len(graphs_train_data))
-    print("graphs_val_data: ", len(graphs_val_data))
+    #print("graphs_train_data: ", len(graphs_train_data))
+    #print("graphs_val_data: ", len(graphs_val_data))
     print('device: ', device)
+    
 
     #******************* TRAIN and GET GNN Embeddings
-    train_build_dataset = BuildDataset(graphs_train_data[:], subset='train', device=device, model_w2v=model_w2v, edge_features=edge_features, nfi=nfi, llm_finetuned_name=llm_finetuned_name)
-    train_dataset = train_build_dataset.process_dataset()
-    val_build_dataset = BuildDataset(graphs_val_data[:], subset='val', device=device, model_w2v=model_w2v, edge_features=edge_features, nfi=nfi, llm_finetuned_name=llm_finetuned_name)
-    val_dataset = val_build_dataset.process_dataset()
-    
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=0, pin_memory=False)
-    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=True, num_workers=0, pin_memory=False)
+    if build_dataset == True:
+        train_build_dataset = BuildDataset(graphs_train_data[:], subset='train', device=device, model_w2v=None, edge_features=edge_features, nfi=nfi, llm_finetuned_name=llm_finetuned_name, exp_file_path=exp_file_path, num_labels=num_labels)
+        train_dataset = train_build_dataset.process_dataset()
+        val_build_dataset = BuildDataset(graphs_val_data[:], subset='val', device=device, model_w2v=None, edge_features=edge_features, nfi=nfi, llm_finetuned_name=llm_finetuned_name, exp_file_path=exp_file_path, num_labels=num_labels)
+        val_dataset = val_build_dataset.process_dataset()
+
+    #if load_tensor == True:
+    if not utils.is_dir_empty(dir_path=f'{exp_file_path}/embeddings_word_llm'):
+        train_dataset_tensors = glob.glob(f'{exp_file_path}/embeddings_word_llm/data_train_*.pt')
+        val_dataset_tensors = glob.glob(f'{exp_file_path}/embeddings_word_llm/data_val_*.pt')
+        train_dataset, val_dataset = [], []
+        for tensor_file in train_dataset_tensors:
+            train_dataset.extend(torch.load(tensor_file))
+        for tensor_file in val_dataset_tensors:
+            val_dataset.extend(torch.load(tensor_file))
+
+        print("train_dataset: ", len(train_dataset), "| val_dataset: ", len(val_dataset))
+        cut_off_train = 100 #90
+        cut_off_val = 100 #25
+        train_dataset = train_dataset[:int(len(train_dataset) * (int(cut_off_train) / 100))]
+        val_dataset = val_dataset[:int(len(val_dataset) * (int(cut_off_val) / 100))]
+        print("train_dataset: ", len(train_dataset), "| val_dataset: ", len(val_dataset))
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0, pin_memory=False)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True, num_workers=0, pin_memory=False)
     init_metrics = {'_epoch_stop': 0,'_train_loss': 0,'_val_loss': 0,'_train_acc': 0,'_val_last_acc': 0,'_test_acc': 0,'_exec_time': 0,}
 
     torch.cuda.empty_cache()
@@ -609,26 +672,29 @@ def graph_neural_network(
         'metrics': metrics, 
         'device': device,
         'epoch_num': 100,
-        'gnn_type': 'TransformerConv', # GCNConv, GATConv, TransformerConv
+        'gnn_type': 'TransformerConv', # GCNConv, GATConv, TransformerConv, GraphConv
         'num_features': num_features, 
-        'hidden_channels': 256, 
-        'learning_rate': 0.00001, # W2V: 0.0001 | LLM: 0.00001
-        'gnn_dropout': 0.5,
+        'hidden_channels': 512, # size out embeddings
+        'learning_rate': 0.000001, # W2V: 0.0001 | LLM: 0.00001
+        'gnn_dropout': 0.75,
         'gnn_pooling': 'gmeanp', # gmeanp, gmaxp, topkp
         'gnn_batch_norm': 'BatchNorm1d', # None, BatchNorm1d
-        'gnn_layers_convs': 4,
+        'gnn_layers_convs': 3,
         'gnn_heads': 3, 
         'gnn_dense_nhid': 128,
-        'num_classes': 2,
+        'num_classes': num_labels,
         'edge_dim': edge_dim, # None, 2 
     }
-    model, metrics, embeddings_train_gnn, embeddings_val_gnn = gnn_model(**train_model_args)
     
+    model, metrics, embeddings_train_gnn, embeddings_val_gnn = gnn_model(**train_model_args)
+
     configs = {"train_model_args": str(train_model_args), "metrics": str(metrics), "model": str(model)}
-    torch.save(model, f'{exp_file_path}/model_GNN_{exp_file_name}_{dataset_partition}.pt')
-    utils.save_llm_embedings(embeddings_data=embeddings_train_gnn, emb_type='gnn', file_path=f"{exp_file_path}/embeddings_gnn/autext24_train_emb_batch_")
-    utils.save_llm_embedings(embeddings_data=embeddings_val_gnn, emb_type='gnn', file_path=f"{exp_file_path}/embeddings_gnn/autext24_val_emb_batch_")
-    utils.save_json(configs, file_path=f'{exp_file_path}configs.json')
+    torch.save(model, f'{exp_file_path}/model_GNN_{exp_file_name}_{dataset_partition}_2.pt')
+    utils.save_llm_embedings(embeddings_data=embeddings_train_gnn, emb_type='gnn', file_path=f"{exp_file_path}/embeddings_gnn_2/autext24_train_emb_batch_")
+    utils.save_llm_embedings(embeddings_data=embeddings_val_gnn, emb_type='gnn', file_path=f"{exp_file_path}/embeddings_gnn_2/autext24_val_emb_batch_")
+    utils.save_json(configs, file_path=f'{exp_file_path}configs_2.json')
+
+    logger.info("DONE GNN Process")
 
 
 
@@ -642,7 +708,7 @@ def graph_neural_network_batch(train_text_docs, val_text_docs, experiments_path_
     init_metrics = {'_epoch_stop': 0,'_train_loss': 0,'_val_loss': 0,'_train_acc': 0,'_val_last_acc': 0,'_test_acc': 0,'_exec_time': 0,}
     num_classes = 2
     nfi = 'llm'
-    cuda_num = 0
+    cuda_num = 1
     device = torch.device(f"cuda:{cuda_num}" if torch.cuda.is_available() else "cpu")
 
     for index, row in experiments_data.iterrows():
@@ -677,12 +743,22 @@ def graph_neural_network_batch(train_text_docs, val_text_docs, experiments_path_
         if not row['gnn_edge_attr']:
             edge_dim = None
 
+        exp_file_path = utils.OUTPUT_DIR_PATH + 'batch_expriments/'
         try:
-            train_build_dataset = BuildDataset(graphs_train_data[:], subset='train', device=device, model_w2v=None, edge_features=row['gnn_edge_attr'], nfi=nfi, llm_finetuned_name=row['graph_node_feat_init'])
+
+            train_build_dataset = BuildDataset(graphs_train_data[:], subset='train', device=device, model_w2v=None, edge_features=row['gnn_edge_attr'], nfi=nfi, llm_finetuned_name=row['graph_node_feat_init'], exp_file_path=exp_file_path)
             train_dataset = train_build_dataset.process_dataset()
-            val_build_dataset = BuildDataset(graphs_val_data[:], subset='val', device=device, model_w2v=None, edge_features=row['gnn_edge_attr'], nfi=nfi, llm_finetuned_name=row['graph_node_feat_init'])
+            val_build_dataset = BuildDataset(graphs_val_data[:], subset='val', device=device, model_w2v=None, edge_features=row['gnn_edge_attr'], nfi=nfi, llm_finetuned_name=row['graph_node_feat_init'], exp_file_path=exp_file_path)
             val_dataset = val_build_dataset.process_dataset()
             
+            train_dataset_tensors = glob.glob(f'{exp_file_path}/embeddings_word_llm/data_train_*.pt')
+            val_dataset_tensors = glob.glob(f'{exp_file_path}/embeddings_word_llm/data_val_*.pt')
+            train_dataset, val_dataset = [], []
+            for tensor_file in train_dataset_tensors:
+                train_dataset.extend(torch.load(tensor_file))
+            for tensor_file in val_dataset_tensors:
+                val_dataset.extend(torch.load(tensor_file))
+
             train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=4, pin_memory=True)
             val_loader = DataLoader(val_dataset, batch_size=128, shuffle=True, num_workers=4, pin_memory=True)
 
@@ -722,3 +798,48 @@ def graph_neural_network_batch(train_text_docs, val_text_docs, experiments_path_
 
     print('*** DONE EXPERIMENTS') 
 
+
+def graph_neural_network_test_eval(autext_test_set, t2g_instance, exp_file_path, dataset_partition, device):
+
+    #  Text 2 Graph test data and BuildDataset
+    graphs_test_data = utils.t2g_transform(autext_test_set, t2g_instance)
+    utils.save_data(graphs_test_data, path=f'{utils.OUTPUT_DIR_PATH}graphs/', file_name=f'graphs_test_{dataset_partition}')
+    #graphs_test_data = utils.load_data(path=f'{utils.OUTPUT_DIR_PATH}graphs/', file_name=f'graphs_test_{dataset_partition}')  
+
+    edge_features = True
+    llm_finetuned_name = 'andricValdez/bert-base-multilingual-cased-finetuned-autext24'
+
+    test_build_dataset = BuildDataset(graphs_test_data[:], subset='test', device=device, model_w2v=None, edge_features='True', nfi='llm', llm_finetuned_name=llm_finetuned_name, exp_file_path=exp_file_path)
+    test_dataset = test_build_dataset.process_dataset()
+
+    test_dataset_tensors = glob.glob(f'{exp_file_path}/embeddings_word_llm/data_test_*.pt')
+    test_dataset = []
+    for tensor_file in test_dataset_tensors:
+        test_dataset.extend(torch.load(tensor_file))
+
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=0, pin_memory=False)
+    
+    #  get GNN Emb
+    gnn_model_name = 'model_GNN_test_autext24_all_100perc'
+    gnn_model = torch.load(f"{exp_file_path}{gnn_model_name}.pt", map_location = device)
+    print(gnn_model)
+    
+    #for step, data in enumerate(test_loader):
+    #    print(step, data['context']['id'], data['context']['target'], data['context']['lang'], data['context']['lang_confidence'])
+    #    print(data)
+
+    gnn_test_embeddings = []
+    gnn_model.to(device)
+    with torch.no_grad():
+        for step, data in enumerate(test_loader): 
+            data.to(device)
+            out, embeddings = gnn_model(data.x, data.edge_index, data.edge_attr, data.batch)  
+            gnn_test_embeddings.append({
+                'batch': step, 
+                'doc_id': data.context['id'], 
+                "labels": data.y,
+                'embedding': embeddings
+            })
+
+    utils.save_llm_embedings(embeddings_data=gnn_test_embeddings, emb_type='gnn',file_path=f"{exp_file_path}/embeddings_gnn/autext24_test_emb_batch_")
+    
