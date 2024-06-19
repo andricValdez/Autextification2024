@@ -34,7 +34,7 @@ TODAY_DATE = datetime.today().strftime('%Y-%m-%d')
 CURRENT_TIME = datetime.today().strftime('%Y%m%d%H%M%S')
 LANGUAGE = 'en' #es, en, fr
 
-LLM_GET_EMB_BATCH_SIZE_DATALOADER = 64
+LLM_GET_EMB_BATCH_SIZE_DATALOADER = 128
 
 
 #************************************* UTILS
@@ -114,7 +114,10 @@ def process_autext24_dataset(corpus_text_docs):
         doc = {
             "id": instance['id'], 
             "doc": instance['text'][:], 
-            "context": {"id": instance['id'], "target": instance['label'], "lang": instance['lang'], "lang_code": instance['lang_code'], 'lang_confidence': instance['lang_confidence']}
+            "context": {
+                "id": instance['id'], "target": instance['label'], 
+                #"lang": instance['lang'], "lang_code": instance['lang_code'], 'lang_confidence': instance['lang_confidence']
+            }
         }
         text_data_lst.append(doc)
     return text_data_lst
@@ -184,8 +187,9 @@ def joblib_parallel(delayed_funct, process_name, num_proc, backend='loky', mmap_
 def create_expriment_dirs(exp_file_path):
     create_dir(dir_path=exp_file_path)
     create_dir(dir_path=exp_file_path + 'embeddings_gnn/')
-    create_dir(dir_path=exp_file_path + 'embeddings_cls_llm/')
+    create_dir(dir_path=exp_file_path + 'embeddings_cls_llm_1/')
     create_dir(dir_path=exp_file_path + 'embeddings_cls_llm_2/')
+    create_dir(dir_path=exp_file_path + 'embeddings_cls_llm_3/')
     create_dir(dir_path=exp_file_path + 'embeddings_word_llm/')
     create_dir(dir_path=exp_file_path + 'graphs/')
     create_dir(dir_path=exp_file_path + 'preds/')
@@ -241,5 +245,7 @@ def extract_stylo_feat(data, output_path, subset):
 def llm_get_embbedings(text_data, exp_file_path, subset, emb_type, device, save_emb, llm_finetuned_name, num_labels):
     print('Getting llm_embbedings...')
     text_data_lst = [{'id': d['context']['id'], 'label': d['context']['target'], 'text': d['doc']} for d in text_data]
-    output_train_path = f"{exp_file_path}/autext24_{subset}_emb_batch_"
-    node_feat_init.llm_get_embbedings(text_data_lst, subset=subset, emb_type=emb_type, device=device, output_path=output_train_path, save_emb=True, llm_finetuned_name=llm_finetuned_name, num_labels=num_labels)
+    #output_train_path = f"{exp_file_path}/autext24_{subset}_emb_batch_"
+    #node_feat_init.llm_get_embbedings(text_data_lst, subset=subset, emb_type=emb_type, device=device, output_path=output_train_path, save_emb=True, llm_finetuned_name=llm_finetuned_name, num_labels=num_labels)
+    output_train_path = f"{exp_file_path}/autext24_{subset}_embeddings.jsonl"
+    node_feat_init.llm_get_embbedings_2(text_data_lst, subset=subset, emb_type=emb_type, device=device, output_path=output_train_path, save_emb=True, llm_finetuned_name=llm_finetuned_name, num_labels=num_labels)

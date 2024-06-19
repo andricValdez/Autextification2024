@@ -40,7 +40,8 @@ TOKENIZER_FILE = "/home/avaldez/projects/Autextification2024/inputs/bert-base-mu
 
 
 def custom_tokenizer(nlp):
-    infix_re = re.compile(r'''[.\,\?\:\;\...\‘\’\`\“\”\"\'~]''')
+    #infix_re = re.compile(r'''[.\,\?\:\;\...\‘\’\`\“\”\"\'~]''')
+    infix_re = re.compile(r'(?:[\\(){}[\]=&|^+<>/*%;.\'"?!~-]|(?:\w+|\d+))')
     prefix_re = compile_prefix_regex(nlp.Defaults.prefixes)
     suffix_re = compile_suffix_regex(nlp.Defaults.suffixes)
 
@@ -88,7 +89,7 @@ class BTokenizerLLM:
         return Doc(self.vocab, words=words, spaces=spaces)
 
 '''
-tokenizer_file = "/home/avaldez/projects/Autextification2024/inputs/bert-base-multilingual-cased.txt"
+tokenizer_file = "/home/avaldez/projects/Autextification2024/inputs/bert-base-multilingual-cased-finetuned-autext24.txt"
 nlp = spacy.blank("en")
 nlp.tokenizer = BTokenizerLLM(nlp.vocab, tokenizer_file)
 doc = nlp("Justin Drew Bieber is a Canadian singer, songwriter, and actor.")
@@ -266,7 +267,8 @@ class Text2Graph():
         logger.debug("Preprocessing")
         
         for doc_data in corpus_texts:
-            lang_code = doc_data['context']['lang_code']
+            #lang_code = doc_data['context']['lang_code']
+            lang_code = 'en'
             if self.apply_prep == True:
                 doc_data['doc'] = self._text_normalize(doc_data['doc'], lang_code)
             prep_docs.append(
